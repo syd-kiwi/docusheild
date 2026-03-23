@@ -1,6 +1,6 @@
 # DocuShield Prototype
 
-This repository contains a runnable prototype for the DocuShield VR privacy pipeline you described:
+This repository contains a runnable prototype:
 
 - A Unity-ready virtual home-office scene spec with a realistic desk, shelf, whiteboard, and paper artifacts.
 - A YOLO-style detector facade that models how ONNX Runtime in Unity will consume rendered frames.
