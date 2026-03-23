@@ -9,11 +9,20 @@ BBox = Tuple[int, int, int, int]
 
 
 @dataclass
+class SceneElement:
+    element_id: str
+    kind: str
+    bbox: BBox
+    description: str
+
+
+@dataclass
 class SceneObject:
     object_id: str
     class_name: str
     bbox: BBox
     readable: bool = True
+    anchor_element_id: str | None = None
 
 
 @dataclass
@@ -27,6 +36,8 @@ class Frame:
     distance: float
     motion: float
     camera_angle: float
+    source: str = "unity_render_texture"
+    layout_elements: List[SceneElement] = field(default_factory=list)
 
 
 @dataclass
@@ -40,6 +51,8 @@ class Detection:
 class RiskAssessment:
     risk_score: float
     detections: List[Detection]
+    risk_level: str
+    notification: str
 
 
 @dataclass
