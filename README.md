@@ -1,6 +1,6 @@
 # DocuShield Prototype
 
-This repository contains a runnable prototype:
+This repository contains a runnable prototype for the DocuShield VR privacy pipeline you described:
 
 - A Unity-ready virtual home-office scene spec with a realistic desk, shelf, whiteboard, and paper artifacts.
 - A YOLO-style detector facade that models how ONNX Runtime in Unity will consume rendered frames.
@@ -27,15 +27,48 @@ The current codebase simulates the Unity-side rendering and inference contract i
 - `unity_prototype/`: importable Unity starter kit with scene bootstrap, detector contract, and overlay demo scripts.
 - `artifacts/unity_scene_spec.json`: exported scene layout and detector handoff contract.
 
-## Run
+## Install
+
+Run installation as its own command first:
 
 ```bash
 python -m pip install -e .
-docushield-run \
-  --frames 20 \
-  --audit-path artifacts/audit_log.jsonl \
-  --scene-spec-path artifacts/unity_scene_spec.json \
+```
+
+## Run
+
+### Cross-platform Python module form (recommended)
+
+This is the safest option on Windows, macOS, and Linux:
+
+```bash
+python -m docushield.cli --frames 20 --audit-path artifacts/audit_log.jsonl --scene-spec-path artifacts/unity_scene_spec.json --mockup-path shareables/docushield_vr_mockup.svg
+```
+
+### Console-script form
+
+After installation, you can also run the generated console script:
+
+```bash
+docushield-run --frames 20 --audit-path artifacts/audit_log.jsonl --scene-spec-path artifacts/unity_scene_spec.json --mockup-path shareables/docushield_vr_mockup.svg
+```
+
+### Windows PowerShell example
+
+```powershell
+python -m pip install -e .
+python -m docushield.cli `
+  --frames 20 `
+  --audit-path artifacts/audit_log.jsonl `
+  --scene-spec-path artifacts/unity_scene_spec.json `
   --mockup-path shareables/docushield_vr_mockup.svg
+```
+
+### Windows Command Prompt example
+
+```bat
+python -m pip install -e .
+python -m docushield.cli --frames 20 --audit-path artifacts\audit_log.jsonl --scene-spec-path artifacts\unity_scene_spec.json --mockup-path shareables\docushield_vr_mockup.svg
 ```
 
 ## Outputs
