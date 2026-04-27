@@ -1,102 +1,168 @@
 from __future__ import annotations
 
-import random
-from dataclasses import dataclass, asdict
-from typing import Iterable, List, Set
+import argparse
+import csv
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
 
-from .models import Detection, Frame, RiskAssessment
-
-
-@dataclass
-class OnnxRuntimeConfig:
-    model_path: str = "Assets/StreamingAssets/yolo/docushield_yolo.onnx"
-    execution_provider: str = "CPUExecutionProvider"
-    input_width: int = 640
-    input_height: int = 640
-    conf_threshold: float = 0.25
-    iou_threshold: float = 0.45
-    downsample_factor: int = 2
+from PIL import Image, ImageDraw
+from ultralytics import YOLO
 
 
-class YoloOnnxDetector:
-    """ONNX-deployable detector facade.
+DEFAULT_ALLOWED_CLASSES: tuple[str, ...] = (
+    "person",
+    "car",
+    "bicycle",
+    "motorcycle",
+    "bus",
+    "truck",
+    "cat",
+    "dog",
+)
 
-    In production, replace `_infer_with_ground_truth` with ONNX Runtime for Unity calls.
-    This implementation keeps the same interface so Unity-side integration stays stable.
-    """
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
-    _CLASS_WEIGHTS = {
-        "document": 1.0,
-        "envelope": 0.8,
-        "notebook": 0.7,
-        "whiteboard": 0.9,
-    }
 
-    def __init__(self, classes: Iterable[str], config: OnnxRuntimeConfig | None = None, seed: int = 11) -> None:
-        self.classes: Set[str] = set(classes)
-        self.config = config or OnnxRuntimeConfig()
-        self._rng = random.Random(seed)
+@dataclass(frozen=True)
+class DetectionRow:
+    image_name: str
+    class_name: str
+    confidence: float
+    x1: float
+    y1: float
+    x2: float
+    y2: float
 
-    def infer(self, frame: Frame) -> RiskAssessment:
-        detections = self._infer_with_ground_truth(frame)
-        risk_score = self._compute_risk_score(frame, detections)
-        risk_level = self._risk_level(risk_score)
-        return RiskAssessment(
-            risk_score=risk_score,
-            detections=detections,
-            risk_level=risk_level,
-            notification=self._notification_text(risk_level, detections),
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run YOLOv10 on every image in a folder, keep only detections from an allow-list, "
+            "save detections to CSV, and write annotated images to an output folder."
         )
+    )
+    parser.add_argument("--input-dir", required=True, help="Folder containing input images.")
+    parser.add_argument("--output-dir", default="outputs", help="Folder for annotated images + CSV output.")
+    parser.add_argument("--model", default="yolov10n.pt", help="Path/name of YOLOv10 model weights.")
+    parser.add_argument(
+        "--allowed-classes",
+        nargs="+",
+        default=list(DEFAULT_ALLOWED_CLASSES),
+        help="Only detections from these classes are saved (default is built-in allow-list).",
+    )
+    parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold (0.0 - 1.0).")
+    parser.add_argument(
+        "--csv-name",
+        default="detections.csv",
+        help="CSV filename written inside --output-dir.",
+    )
+    return parser.parse_args()
 
-    def _infer_with_ground_truth(self, frame: Frame) -> List[Detection]:
-        detections: List[Detection] = []
-        quality_factor = max(0.1, frame.lighting) * (1.0 - min(frame.motion, 0.8) * 0.35)
-        quality_factor *= (1.0 - min(frame.clutter, 0.9) * 0.2)
-        quality_factor *= 1.0 - min(frame.distance, 1.7) * 0.08
 
-        for obj in frame.objects:
-            if obj.class_name not in self.classes:
-                continue
-            base_conf = 0.55 + 0.4 * quality_factor
-            confidence = max(0.05, min(0.99, base_conf + self._rng.uniform(-0.12, 0.1)))
-            if confidence < self.config.conf_threshold:
-                continue
-            detections.append(
-                Detection(class_name=obj.class_name, bbox=obj.bbox, confidence=confidence)
+def iter_images(input_dir: Path) -> Iterable[Path]:
+    for path in sorted(input_dir.iterdir()):
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
+            yield path
+
+
+def save_csv(csv_path: Path, rows: Sequence[DetectionRow]) -> None:
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["image_name", "class_name", "confidence", "x1", "y1", "x2", "y2"])
+        for row in rows:
+            writer.writerow(
+                [
+                    row.image_name,
+                    row.class_name,
+                    f"{row.confidence:.6f}",
+                    f"{row.x1:.2f}",
+                    f"{row.y1:.2f}",
+                    f"{row.x2:.2f}",
+                    f"{row.y2:.2f}",
+                ]
             )
-        return detections
 
-    def _compute_risk_score(self, frame: Frame, detections: List[Detection]) -> float:
-        if not detections:
-            return 0.0
-        weighted_confidence = sum(
-            d.confidence * self._CLASS_WEIGHTS.get(d.class_name, 0.5) for d in detections
-        ) / len(detections)
-        readable_boost = 0.12 + 0.03 * len(detections)
-        stress_penalty = min(0.25, frame.distance * 0.08 + abs(frame.camera_angle) * 0.003)
-        score = weighted_confidence * 0.68 + readable_boost + stress_penalty
-        return max(0.0, min(1.0, score))
 
-    def unity_inference_contract(self) -> dict[str, object]:
-        return {
-            "pipeline": "Unity RenderTexture -> Texture2D frame extraction -> ONNX Runtime tensor -> YOLO postprocess",
-            "onnx": asdict(self.config),
-            "outputs": ["bounding_boxes", "class_labels", "confidence_scores", "risk_score", "risk_level"],
-        }
+def run_detector(
+    input_dir: Path,
+    output_dir: Path,
+    model_name_or_path: str,
+    allowed_classes: Sequence[str],
+    conf_threshold: float,
+    csv_name: str,
+) -> Path:
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise FileNotFoundError(f"Input directory does not exist or is not a directory: {input_dir}")
 
-    def _risk_level(self, score: float) -> str:
-        if score >= 0.72:
-            return "high"
-        if score >= 0.4:
-            return "medium"
-        return "low"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    annotated_dir = output_dir / "annotated"
+    annotated_dir.mkdir(parents=True, exist_ok=True)
 
-    def _notification_text(self, risk_level: str, detections: List[Detection]) -> str:
-        if not detections:
-            return "No sensitive physical artifacts detected in the rendered frame."
-        classes = ", ".join(sorted({d.class_name for d in detections}))
-        if risk_level == "high":
-            return f"High exposure risk: {classes} detected. Blur overlays and user warning should be shown."
-        if risk_level == "medium":
-            return f"Moderate exposure risk: {classes} detected. Notify the user and monitor subsequent frames."
-        return f"Low exposure risk: {classes} detected. Keep the scene under observation."
+    allow_set = {name.lower() for name in allowed_classes}
+    model = YOLO(model_name_or_path)
+    rows: list[DetectionRow] = []
+
+    image_paths = list(iter_images(input_dir))
+    if not image_paths:
+        raise ValueError(f"No supported images found in: {input_dir}")
+
+    for image_path in image_paths:
+        results = model.predict(source=str(image_path), conf=conf_threshold, verbose=False)
+        if not results:
+            continue
+
+        result = results[0]
+        names = result.names
+
+        keep_indexes: list[int] = []
+        for idx, cls_id in enumerate(result.boxes.cls.tolist()):
+            class_name = names[int(cls_id)]
+            if class_name.lower() in allow_set:
+                keep_indexes.append(idx)
+
+        annotated_image = Image.open(image_path).convert("RGB")
+        draw = ImageDraw.Draw(annotated_image)
+
+        for idx in keep_indexes:
+            class_name = names[int(result.boxes.cls[idx].item())]
+            confidence = float(result.boxes.conf[idx].item())
+            x1, y1, x2, y2 = result.boxes.xyxy[idx].tolist()
+            rows.append(
+                DetectionRow(
+                    image_name=image_path.name,
+                    class_name=class_name,
+                    confidence=confidence,
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                )
+            )
+
+            draw.rectangle([(x1, y1), (x2, y2)], outline="red", width=3)
+            draw.text((x1, max(0, y1 - 14)), f"{class_name} {confidence:.2f}", fill="red")
+
+        annotated_path = annotated_dir / image_path.name
+        annotated_image.save(annotated_path)
+
+    csv_path = output_dir / csv_name
+    save_csv(csv_path, rows)
+    return csv_path
+
+
+def main() -> None:
+    args = parse_args()
+    csv_path = run_detector(
+        input_dir=Path(args.input_dir),
+        output_dir=Path(args.output_dir),
+        model_name_or_path=args.model,
+        allowed_classes=args.allowed_classes,
+        conf_threshold=args.conf,
+        csv_name=args.csv_name,
+    )
+    print(f"Saved detection CSV: {csv_path}")
+
+
+if __name__ == "__main__":
+    main()
